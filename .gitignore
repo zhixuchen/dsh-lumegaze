@@ -1,0 +1,13 @@
+# 依赖（误追踪：构建/安装产物，非源码）
+node_modules/
+
+# 编排总线与任务板运行时状态（非交付物）
+.expert-bus/
+.expert-taskboards/
+
+# IDE 本地配置
+.idea/
+
+# 杂项
+*.log
+.DS_Store
