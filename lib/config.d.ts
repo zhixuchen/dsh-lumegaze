@@ -15,12 +15,15 @@ export declare const SETTINGS_NAMESPACE = "lumegaze";
 export declare const Config: Schemastery<any, any, 'plain'>;
 /** `apply(ctx, config)` 收到的运行时配置形状（volatile 字段已包成 `Volatile<T>`）。 */
 export interface Config {
+    enabled: Volatile<boolean>;
     wsPort: Volatile<number>;
     serverUrl: Volatile<string>;
     personaPrompt: Volatile<string>;
     authSecret: Volatile<string>;
     logEnabled: Volatile<boolean>;
     walkerAiSwitches: Volatile<Record<string, boolean>>;
+    memoryMode: Volatile<string>;
+    billionStatus: Volatile<string>;
 }
 /** 读取 volatile 字段：运行时是 `Volatile<T>`，测试/裸调用可能直接是 `T`。 */
 export declare function readVolatile<T>(value: T | Volatile<T>): T;
