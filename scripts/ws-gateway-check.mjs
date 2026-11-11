@@ -11,14 +11,21 @@
  * 5) 日志五类齐全且不含 authSecret 明文（含脱敏器单测）。
  * 6) 开关经 ctx.settings.mutate 持久化；重新加载插件后开关状态保留。
  * 7) engine 接口 + setEngine 接缝可注入。
+ * T11 回炉：
+ * 8) M1 插件总开关实际生效：enabled=false 不启动网关；isEnabled=false 帧级回 PLUGIN_DISABLED。
+ * T12 回炉：
+ * 9) M1 反向通路：enabled=false 启动 → volatile-update(enabled=true) 启动网关 / (false) 停止监听。
  */
 import { spawnSync } from 'node:child_process'
+import net from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
+import { updateVolatile } from '@deepseek-ai/cosmokit'
 import { WebSocket } from 'ws'
 import * as plugin from '../lib/index.js'
 import { getEngine, resetEngine, setEngine, unavailableEngine, ENGINE_NOT_READY } from '../lib/engine.js'
 import { SETTINGS_NAMESPACE } from '../lib/config.js'
 import { LumegazeLogger } from '../lib/logger.js'
+import { WsGateway, readQueryToken } from '../lib/ws-server.js'
 
 const PORT = 8790
 const AUTH = 's3cr3t-sentinel-9f8e7d6c5b'
@@ -30,14 +37,14 @@ function check(name, ok, detail = '') {
 }
 
 /** 监听证据：优先 ss，macOS 回退 netstat / lsof。 */
-function listenEvidence() {
+function listenEvidence(port = PORT) {
   const run = (cmd, args) => {
     const r = spawnSync(cmd, args, { encoding: 'utf8' })
     return r.status === 0 ? r.stdout : ''
   }
   let out = run('ss', ['-ltn'])
-  if (!out.includes('8790')) out = run('netstat', ['-an', '-p', 'tcp'])
-  if (!out.includes('8790')) out = run('lsof', ['-nP', '-iTCP:8790', '-sTCP:LISTEN'])
+  if (!out.includes(String(port))) out = run('netstat', ['-an', '-p', 'tcp'])
+  if (!out.includes(String(port))) out = run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'])
   return out
 }
 
@@ -50,6 +57,38 @@ async function waitForListen(timeoutMs = 4000) {
     await new Promise((resolve) => setTimeout(resolve, 150))
   }
   return listenEvidence()
+}
+
+/** 轮询直到指定端口开始监听。 */
+async function waitForListenOn(port, timeoutMs = 4000) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (listenEvidence(port).includes(String(port))) return true
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  return listenEvidence(port).includes(String(port))
+}
+
+/** 轮询直到指定端口不再监听（stop 异步关闭）。 */
+async function waitForNotListen(port, timeoutMs = 4000) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (!listenEvidence(port).includes(String(port))) return true
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  return !listenEvidence(port).includes(String(port))
+}
+
+/**
+ * 模拟 `Loader._commitVolatile()`：先更新 volatile 引用，再以所属 fiber 过滤
+ * 上下文派发 `loader/volatile-update`（paths 为路径数组的数组）。
+ * 真实面板保存经 configForms → configEditor.edit → Loader.update → _commitVolatile。
+ */
+function commitVolatileUpdate(fiber, paths, enabledValue) {
+  updateVolatile(fiber.config.enabled, { get: () => enabledValue })
+  const self = Object.create(fiber.ctx)
+  self[Context.filter] = (owner) => owner.fiber === fiber
+  fiber.ctx.emit(self, 'loader/volatile-update', paths)
 }
 
 class Collector {
@@ -79,9 +118,9 @@ class Collector {
   }
 }
 
-function openClient(headers = {}) {
+function openClient(headers = {}, url = `ws://127.0.0.1:${PORT}`) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers })
+    const ws = new WebSocket(url, { headers })
     const timer = setTimeout(() => {
       ws.terminate()
       reject(new Error('connect timeout'))
@@ -101,9 +140,9 @@ function openClient(headers = {}) {
   })
 }
 
-async function expectRejected(headers, label) {
+async function expectRejected(headers, label, url) {
   try {
-    const ws = await openClient(headers)
+    const ws = await openClient(headers, url)
     ws.terminate()
     check(label, false, 'handshake unexpectedly accepted')
   } catch {
@@ -173,6 +212,27 @@ async function main() {
   const aliceC = new Collector(alice)
   const bobC = new Collector(bob)
   check('handshake accepted with correct x-lumegaze-auth', true)
+
+  // ---- 2b) query 承载（浏览器 / Tauri WebView 无法自定义 upgrade 头）----
+  const qs = `ws://127.0.0.1:${PORT}`
+  const urlWithToken = `${qs}?token=${encodeURIComponent(AUTH)}`
+  await expectRejected({}, 'handshake rejected when token query absent', `${qs}?foo=1`)
+  await expectRejected({}, 'handshake rejected with wrong ?token=', `${qs}?token=wrong-value`)
+  const viaQuery = await openClient({}, urlWithToken)
+  viaQuery.terminate()
+  check('handshake accepted with correct ?token=', true)
+  const headerWrongQueryOk = await openClient({ 'x-lumegaze-auth': 'wrong-value' }, urlWithToken)
+  headerWrongQueryOk.terminate()
+  check('handshake accepted when header wrong but ?token= correct', true)
+  const headerOkQueryWrong = await openClient({ 'x-lumegaze-auth': AUTH }, `${qs}?token=wrong-value`)
+  headerOkQueryWrong.terminate()
+  check('handshake accepted when ?token= wrong but header correct', true)
+  // query 承载解析单元：百分号解码 / 多参数 / 畸形序列不抛错
+  check('readQueryToken reads ?token=', readQueryToken('/?token=abc') === 'abc')
+  check('readQueryToken decodes percent escapes', readQueryToken('/?token=' + encodeURIComponent('a+b c&d=e')) === 'a+b c&d=e')
+  check('readQueryToken finds token among other params', readQueryToken('/?x=1&token=xyz') === 'xyz')
+  check('readQueryToken returns undefined when absent', readQueryToken('/?x=1') === undefined)
+  check('readQueryToken tolerates malformed percent escapes', readQueryToken('/?token=%ZZ') === '%ZZ')
 
   // ---- 3) 开关关闭 → 拦截，引擎零调用 ----
   alice.send(JSON.stringify({ sessionId: 's-off', userId: 'u-off', type: 'toggle_walker_ai', content: false, timestamp: Math.floor(Date.now() / 1000) }))
@@ -300,6 +360,21 @@ async function main() {
   check('restart: u-a=false retained, chat intercepted', restartOff.errorCode === 'WALKER_AI_DISABLED', JSON.stringify(restartOff))
   await fiber2.dispose()
 
+  // ---- 9b) authSecret 为空 → 不鉴权（向后兼容，行为与之前一致）----
+  const fiber3 = await ctx.plugin(plugin, {
+    wsPort: PORT,
+    logEnabled: true,
+    authSecret: '',
+    walkerAiSwitches: {},
+  })
+  const noAuth = await openClient({})
+  noAuth.terminate()
+  check('authSecret empty: handshake accepted without any carrier', true)
+  const noAuthQuery = await openClient({}, `ws://127.0.0.1:${PORT}?token=anything`)
+  noAuthQuery.terminate()
+  check('authSecret empty: handshake accepted regardless of query', true)
+  await fiber3.dispose()
+
   // ---- 10) 日志分级 + 脱敏 ----
   const formatted = messages.map((m) => String(m.args?.[0] ?? ''))
   const categories = ['connection', 'switch', 'inference', 'dependency', 'server']
@@ -330,6 +405,159 @@ async function main() {
   tokenLogger.connection('Authorization: Bearer abcdef123456')
   const tokenDump = JSON.stringify(scrubbed)
   check('logger scrubs authorization header value', /authorization:\*\*\*/i.test(tokenDump) && !/abcdef123456/.test(tokenDump))
+
+  // ---- 12) M1 插件总开关实际生效 ----
+  console.log('\n-- M1 插件总开关：enabled=false 不启动网关 + 帧级 PLUGIN_DISABLED 拦截 --')
+  {
+    // (a) enabled=false → apply 不启动 WS 网关（端口无监听）
+    const disabledFiber = await ctx.plugin(plugin, {
+      wsPort: PORT,
+      logEnabled: true,
+      enabled: false,
+      authSecret: '',
+      walkerAiSwitches: {},
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    check('enabled=false：插件不启动 WS 网关（端口未监听）', !listenEvidence().includes('8790'), listenEvidence().trim())
+    await disabledFiber.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    // (b) 帧级守卫：网关运行但 isEnabled 恒 false → chat/game_tick 回 PLUGIN_DISABLED 且零引擎调用
+    const gwPort = await new Promise((resolve, reject) => {
+      const srv = net.createServer()
+      srv.on('error', reject)
+      srv.listen(0, '127.0.0.1', () => {
+        const { port } = srv.address()
+        srv.close(() => resolve(port))
+      })
+    })
+    const gwEngineCalls = []
+    const gwBase = { info() {}, warn() {}, error() {}, debug() {} }
+    const gw = new WsGateway({
+      switches: { isEnabled: () => true, set() {}, persist: async () => true, snapshot: () => ({}), clear() {} },
+      sessions: { touch() {} },
+      logger: new LumegazeLogger({ base: gwBase, isDetailed: () => true, secrets: () => [] }),
+      authSecret: () => '',
+      isEnabled: () => false,
+      engine: () => ({
+        chat: async (input) => {
+          gwEngineCalls.push(input)
+          return { text: 'x', emotion: 'normal', action: [], success: true, errorCode: '', errorMsg: '' }
+        },
+      }),
+    })
+    gw.start(gwPort)
+    const gwClient = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${gwPort}`)
+      const timer = setTimeout(() => {
+        ws.terminate()
+        reject(new Error('gw connect timeout'))
+      }, 4000)
+      ws.on('open', () => {
+        clearTimeout(timer)
+        resolve(ws)
+      })
+      ws.on('error', (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+    })
+    const gwCollector = new Collector(gwClient)
+    gwClient.send(JSON.stringify({ sessionId: 's-dis', userId: 'u-dis', type: 'chat', content: 'hi', timestamp: Math.floor(Date.now() / 1000) }))
+    const disChat = await gwCollector.next()
+    check('isEnabled=false：chat 回 PLUGIN_DISABLED', disChat.success === false && disChat.errorCode === 'PLUGIN_DISABLED', JSON.stringify(disChat))
+    check('isEnabled=false：chat 不调用引擎', gwEngineCalls.length === 0, `calls=${gwEngineCalls.length}`)
+    gwClient.send(JSON.stringify({ sessionId: 's-dis', userId: 'u-dis', type: 'game_tick', content: {}, timestamp: Math.floor(Date.now() / 1000) }))
+    const disTick = await gwCollector.next()
+    check('isEnabled=false：game_tick 回 PLUGIN_DISABLED', disTick.success === false && disTick.errorCode === 'PLUGIN_DISABLED', JSON.stringify(disTick))
+    check('isEnabled=false：game_tick 不调用引擎', gwEngineCalls.length === 0, `calls=${gwEngineCalls.length}`)
+    gwClient.terminate()
+    await gw.stop()
+  }
+
+  // ---- 13) M1 反向通路：enabled=false 启动 → volatile-update(true) 启动网关 / (false) 停止 ----
+  console.log('\n-- M1 反向通路：运行期 enabled false→true 启动网关 / true→false 停止 --')
+  {
+    const P = 8791
+    const reverseFiber = await ctx.plugin(plugin, {
+      wsPort: P,
+      logEnabled: true,
+      enabled: false,
+      authSecret: '',
+      walkerAiSwitches: {},
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    check('reverse: enabled=false 启动后端口未监听', !listenEvidence(P).includes(String(P)), listenEvidence(P).trim())
+
+    // 面板把 enabled 改回 true：configForms → Loader._commitVolatile → 提交引用 + 派发事件
+    commitVolatileUpdate(reverseFiber, [['enabled']], true)
+    const started = await waitForListenOn(P)
+    check('reverse: volatile-update(enabled=true) 后网关启动并监听', started, listenEvidence(P).trim())
+
+    // 反向：enabled=true → false → 停止监听
+    commitVolatileUpdate(reverseFiber, [['enabled']], false)
+    const stopped = await waitForNotListen(P)
+    check('reverse: volatile-update(enabled=false) 后网关停止监听', stopped, listenEvidence(P).trim())
+
+    // 非 enabled 路径的事件不应触发启停
+    commitVolatileUpdate(reverseFiber, [['wsPort']], true)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    check('reverse: 非 enabled 路径的 volatile-update 不触发启停', !listenEvidence(P).includes(String(P)), listenEvidence(P).trim())
+
+    await reverseFiber.dispose()
+  }
+
+  // ---- 14) S-4 WsGateway stop/start 关闭窗口竞态 ----
+  console.log('\n-- S-4 WsGateway closing 标志防 stop/start 竞态 --')
+  {
+    const P1 = 8792
+    const P2 = 8793
+    const gw = new WsGateway({
+      switches: { isEnabled: () => true, set() {}, persist: async () => true, snapshot: () => ({}), clear() {} },
+      sessions: { touch() {} },
+      logger: new LumegazeLogger({
+        base: { info() {}, warn() {}, error() {}, debug() {} },
+        isDetailed: () => true,
+        secrets: () => [],
+      }),
+      authSecret: () => '',
+      engine: () => ({
+        chat: async () => ({ text: 'x', emotion: 'normal', action: [], success: true, errorCode: '', errorMsg: '' }),
+      }),
+    })
+    gw.start(P1)
+    check('S-4: start(P1) 后监听', await waitForListenOn(P1))
+    check('S-4: isRunning()=true', gw.isRunning() === true)
+    check('S-4: isClosing()=false', gw.isClosing() === false)
+
+    // 不 await stop()，立即在关闭窗口内 start(P2)
+    const stopPromise = gw.stop()
+    check('S-4: stop() 置 closing 标志', gw.isClosing() === true)
+    check('S-4: 关闭窗口内 isRunning()=false', gw.isRunning() === false)
+    gw.start(P2)
+    check('S-4: 关闭窗口内 start(P2) 不新建实例（isRunning=false）', gw.isRunning() === false)
+
+    await stopPromise
+    check('S-4: stop() 完成后清除 closing', gw.isClosing() === false)
+    check('S-4: 关闭完成后补启延迟 start(P2)', await waitForListenOn(P2), listenEvidence(P2).trim())
+    check('S-4: 补启后 isRunning()=true', gw.isRunning() === true)
+    check('S-4: 旧端口 P1 已释放', !listenEvidence(P1).includes(String(P1)))
+
+    // dispose 路径：关闭窗口内记录的延迟 start 不再补启
+    const disposePromise = gw.dispose()
+    gw.start(P1)
+    check('S-4: dispose 关闭窗口内 start(P1) 不新建实例', gw.isRunning() === false)
+    await disposePromise
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    check('S-4: dispose 后不补启延迟 start', !listenEvidence(P1).includes(String(P1)))
+    check('S-4: dispose 后 isRunning()=false', gw.isRunning() === false)
+
+    // T17 S-4 加固：dispose 已完成后再 start 也不得「复活」网关
+    gw.start(P1)
+    check('S-4: dispose 完成后 start(P1) 不复活（isRunning=false）', gw.isRunning() === false)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    check('S-4: dispose 完成后 start(P1) 端口仍未监听', !listenEvidence(P1).includes(String(P1)), listenEvidence(P1).trim())
+  }
 
   await new Promise((resolve) => setTimeout(resolve, 50))
 }
