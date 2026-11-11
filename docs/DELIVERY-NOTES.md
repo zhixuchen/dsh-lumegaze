@@ -305,3 +305,17 @@
 | 8 | 面板总开关经浏览器半 `ctx.remote.pluginManager` 到宿主 `setPluginEnabled` 的**真实 DSH GUI 端到端调用**（含宿主启用/卸载本插件、面板消失） | 需真实 DSH GUI 登录态 + 宿主 Remote 通道；本机仅以替身 mock 验证契约 | `src/client.ts` / `package.json` 注入接线静态核对 + S-M1-2 契约与失败路径单测 14 项（`client-panel-check.mjs` `[7]`–`[8]`） |
 
 > 以上未验证项不影响本插件按当前实现上架，但上架后应在真实 DSH profile + 观灵域客户端实机复验第 1、2、3、6、8 项。
+
+---
+
+## 9. T18 · Git commit 基线（插件仓 + 客户端仓）
+
+- 插件仓 `/Users/admin/dsh-lumegaze`：新增 `.gitignore`（`node_modules/`、`.expert-bus/`、`.expert-taskboards/`、`.idea/`、`*.log`、`.DS_Store`）；
+  `git rm -r --cached` 解除上述目录的误追踪（磁盘文件保留）；`lib/` 是 `package.json` `files` 字段声明的运行依赖，**不忽略、继续提交**。
+- 插件仓结构化提交（消息含任务 id，可回滚）：
+  `chore(T18)` 基线 → `feat(T1-T14)` 插件实现 → `test(T6/T11/T14)` 验证脚本 → `docs(T6/T13/T15)` 交付文档 → `build(T10/T17)` lib 产物。
+  提交后 `git status` 干净，`git ls-files` 不含 `node_modules/`、`.expert-bus/`、`.expert-taskboards/`、`.idea/`。
+- 客户端仓 `/Users/admin/观灵域`：提交 S5/T7 的 11 个插件相关文件（7 modified + 4 untracked）；
+  根目录 `首页.png`（Unicode NFD 重复项）非本任务产物，未提交。
+- 提交前验证：插件仓 `pnpm typecheck && pnpm build && pnpm verify` 全部通过（exit 0）；客户端仓 `pnpm typecheck` 通过（exit 0）。
+- **hook 状态**：插件仓**未安装**任务板 commit hook，提交前检查为模型自觉执行（typecheck/build/verify + 逐路径 `git add`），hook 未开启；客户端仓存在既有 `commit-msg` hook，本次提交由其校验通过。
