@@ -18,15 +18,17 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
     "dsh.bundle.patch.yml",
     "icon.svg",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && pnpm run build:client",
+    "build:client": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "node scripts/verify-config.mjs && node scripts/disposer-check.mjs && node scripts/ws-gateway-check.mjs"
+    "verify": "node scripts/verify-config.mjs && node scripts/disposer-check.mjs && node scripts/ws-gateway-check.mjs && node scripts/agent-engine-check.mjs && node scripts/client-panel-check.mjs && node scripts/e2e-check.mjs"
   },
   "engines": {
     "dsh": ">=0.2.1-rc.5",
@@ -36,7 +38,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
     "@deepseek-ai/dsh-plugin-manager": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.5",
     "@deepseek-ai/dsh-settings": "0.2.1-rc.5"
   },
   "dependencies": {
@@ -46,11 +50,24 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
     "@deepseek-ai/dsh-plugin-manager": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.5",
     "@deepseek-ai/dsh-settings": "0.2.1-rc.5",
     "@deepseek-ai/schemastery": "~3.18.5",
     "@types/node": "^22.10.0",
+    "@types/react": "^18.3.31",
     "@types/ws": "^8.5.13",
+    "react": "^18.2.0",
+    "tsdown": "^0.23.7",
     "typescript": "^5.6.3"
   },
   "dsh": {
@@ -62,7 +79,9 @@
       "inject": [
         "slots",
         "locale",
-        "configForms"
+        "configForms",
+        "remote",
+        "remote.pluginManager"
       ]
     }
   }
