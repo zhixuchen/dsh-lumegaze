@@ -77,11 +77,9 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots",
-        "locale",
-        "configForms",
-        "remote",
-        "remote.pluginManager"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     }
   }
