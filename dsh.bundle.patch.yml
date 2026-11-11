@@ -1,0 +1,11 @@
+# dsh-lumegaze bundle layer.
+#
+# Inserts the Host Loader row for this plugin. The row id `lumegaze` is also the
+# settings namespace that `ctx.settings.describe()` / `ctx.settings.update()`
+# use for this plugin's volatile Config fields.
+#
+# No other bundle row is touched: this layer never disables, overrides or
+# removes billion-context (or any other bundle).
+- insert:
+  - id: lumagaze
+    name: dsh-lumegaze
