@@ -1,6 +1,6 @@
 {
   "name": "dsh-lumegaze",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "观灵域行者 AI 网关，需配套观灵域 Tauri 客户端使用",
   "type": "module",
   "license": "MIT",
